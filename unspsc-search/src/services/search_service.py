@@ -81,28 +81,33 @@ def expand_query(query: str) -> List[str]:
     query = query.lower().strip()
     queries = [query]
     
-    # Add acronym expansion if it exists
-    if query in ACRONYMS:
-        expanded = ACRONYMS[query].lower()
-        queries.append(expanded)
-        # Also add individual words from expanded acronym
-        queries.extend(expanded.split())
-    
     # Handle hyphenated terms
     if '-' in query:
         queries.append(query.replace('-', ' '))
     
-    # Add individual words for better matching
-    if ' ' in query:
-        queries.extend(query.split())
+    # Handle common variations
+    variations = []
+    for q in queries:
+        # Add acronym expansion if it exists
+        if q in ACRONYMS:
+            variations.append(ACRONYMS[q])
+        
+        # Add variations without spaces
+        if ' ' in q:
+            variations.append(q.replace(' ', ''))
+        
+        # Add individual words
+        variations.extend(q.split())
+        
+        # Add common suffixes
+        if not q.endswith(('s', 'er', 'or')):
+            variations.extend([q + 's', q + 'er', q + 'or'])
     
-    # Calculate similarity scores for partial acronym matches
-    for acronym, expansion in ACRONYMS.items():
-        if (query in acronym.lower() or 
-            any(query in part.lower() for part in acronym.split('-'))):
-            queries.append(expansion.lower())
+    queries.extend(variations)
     
-    return list(set(queries))  # Remove duplicates
+    # Remove duplicates while preserving order
+    seen = set()
+    return [x for x in queries if not (x in seen or seen.add(x))]
 
 def load_unspsc_data():
     """Load UNSPSC codes from CSV file with better path handling"""
@@ -129,59 +134,42 @@ def load_unspsc_data():
         print(f"Current working directory: {os.getcwd()}")  # Debug info
         return None
 
-def search_unspsc_codes(query: str, unspsc_data: pd.DataFrame) -> List[Tuple[str, str]]:
-    """Search UNSPSC codes using query with improved matching"""
-    if unspsc_data is None or query.strip() == '':
+def search_unspsc_codes(query, unspsc_data) -> List[Tuple[str, str]]:
+    if unspsc_data is None:
         return []
     
     try:
-        # Get expanded queries
+        codes = unspsc_data['Code'].astype(str).tolist()
+        descriptions = unspsc_data['Description'].str.lower().tolist()
+        
+        # Get all possible query variations
         queries = expand_query(query)
-        print(f"Expanded queries: {queries}")  # Debug info
         
-        # First try exact acronym matches
-        exact_matches = []
-        if query.lower() in ACRONYMS:
-            expanded_term = ACRONYMS[query.lower()]
-            mask = unspsc_data['Description'].str.contains(expanded_term, case=False, na=False)
-            exact_matches.extend([
-                (1.0, row['Code'], row['Description'])
-                for _, row in unspsc_data[mask].iterrows()
-            ])
+        # Store all matches with their scores
+        all_matches = []
+        for q in queries:
+            # Search in both full description and individual words
+            for desc in descriptions:
+                desc_words = desc.split()
+                # Calculate match score based on full description and individual words
+                full_score = difflib.SequenceMatcher(None, q, desc).ratio()
+                word_scores = [difflib.SequenceMatcher(None, q, word).ratio() for word in desc_words]
+                # Use the maximum score between full match and word matches
+                score = max([full_score] + word_scores)
+                
+                if score > 0.3:  # Minimum similarity threshold
+                    index = descriptions.index(desc)
+                    all_matches.append((score, codes[index], unspsc_data['Description'].iloc[index]))
         
-        # If no exact matches, try fuzzy matching
-        if not exact_matches:
-            matches = []
-            for q in queries:
-                for _, row in unspsc_data.iterrows():
-                    desc = str(row['Description']).lower()
-                    code = str(row['Code'])
-                    
-                    # Calculate match score
-                    desc_score = difflib.SequenceMatcher(None, q, desc).ratio()
-                    word_scores = [difflib.SequenceMatcher(None, q, word).ratio() 
-                                for word in desc.split()]
-                    
-                    # Use best matching score
-                    score = max([desc_score] + word_scores)
-                    
-                    if score > 0.3:  # Minimum similarity threshold
-                        matches.append((score, code, row['Description']))
-        else:
-            matches = exact_matches
-        
-        # Sort by score and remove duplicates
-        matches.sort(reverse=True)
-        seen = set()
+        # Sort by score and remove duplicates while keeping highest score
+        seen_codes = set()
         results = []
-        for _, code, desc in matches:
-            if code not in seen:
+        for score, code, desc in sorted(all_matches, reverse=True):
+            if code not in seen_codes:
                 results.append((code, desc))
-                seen.add(code)
-                if len(results) >= 5:  # Limit to top 5
-                    break
+                seen_codes.add(code)
         
-        return results
+        return results[:5]  # Return top 5 unique results
         
     except Exception as e:
         print(f"Error during search: {str(e)}")
