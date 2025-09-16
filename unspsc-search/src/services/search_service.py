@@ -1,6 +1,7 @@
 import pandas as pd
 import difflib
 import os
+import time
 from typing import List, Tuple
 
 # Add common acronyms and their expansions
@@ -134,50 +135,68 @@ def load_unspsc_data():
         print(f"Current working directory: {os.getcwd()}")  # Debug info
         return None
 
-def search_unspsc_codes(query, unspsc_data) -> List[Tuple[str, str]]:
-    if unspsc_data is None:
+def search_unspsc_codes(query: str, unspsc_data: pd.DataFrame, timeout: int = 5, max_results: int = 20) -> List[Tuple[str, str]]:
+    """Search UNSPSC codes with improved matching and timeout"""
+    if unspsc_data is None or not query:
         return []
     
     try:
-        codes = unspsc_data['Code'].astype(str).tolist()
-        descriptions = unspsc_data['Description'].str.lower().tolist()
-        
-        # Get all possible query variations
-        queries = expand_query(query)
-        
-        # Store all matches with their scores
-        all_matches = []
-        for q in queries:
-            # Search in both full description and individual words
-            for desc in descriptions:
-                desc_words = desc.split()
-                # Calculate match score based on full description and individual words
-                full_score = difflib.SequenceMatcher(None, q, desc).ratio()
-                word_scores = [difflib.SequenceMatcher(None, q, word).ratio() for word in desc_words]
-                # Use the maximum score between full match and word matches
-                score = max([full_score] + word_scores)
+        start_time = time.time()
+        query = query.lower().strip()
+        matches = []
+
+        # Priority 1: Direct acronym matches
+        if query in ACRONYMS:
+            expanded = ACRONYMS[query].lower()
+            mask = unspsc_data['Description'].str.lower().str.contains(expanded, na=False)
+            matches.extend([
+                (2.0, row['Code'], row['Description']) 
+                for _, row in unspsc_data[mask].iterrows()
+            ])
+            
+            # Return all matches up to max_results for acronyms
+            if matches:
+                return [(code, desc) for _, code, desc in sorted(matches, reverse=True)[:max_results]]
+
+        # Check timeout before continuing
+        if time.time() - start_time > timeout:
+            raise TimeoutError("Search took too long")
+
+        # Priority 2: Fuzzy matching if needed
+        if len(matches) < max_results:
+            for _, row in unspsc_data.iterrows():
+                if time.time() - start_time > timeout:
+                    break
                 
-                if score > 0.3:  # Minimum similarity threshold
-                    index = descriptions.index(desc)
-                    all_matches.append((score, codes[index], unspsc_data['Description'].iloc[index]))
-        
-        # Sort by score and remove duplicates while keeping highest score
-        seen_codes = set()
+                desc = str(row['Description']).lower()
+                score = difflib.SequenceMatcher(None, query, desc).ratio()
+                if score > 0.4:
+                    matches.append((score, row['Code'], row['Description']))
+
+        # Sort and return top matches up to max_results
+        matches.sort(reverse=True)
+        seen = set()
         results = []
-        for score, code, desc in sorted(all_matches, reverse=True):
-            if code not in seen_codes:
+        for _, code, desc in matches:
+            if code not in seen:
                 results.append((code, desc))
-                seen_codes.add(code)
-        
-        return results[:5]  # Return top 5 unique results
-        
+                seen.add(code)
+                if len(results) >= max_results:
+                    break
+
+        return results
+
     except Exception as e:
         print(f"Error during search: {str(e)}")
         return []
 
-def main_search_function(query: str) -> List[Tuple[str, str]]:
+def main_search_function(query: str, max_results: int = 5) -> List[Tuple[str, str]]:
     """Main function to handle search requests"""
     unspsc_data = load_unspsc_data()
     if unspsc_data is None:
+        print("No data loaded")
         return []
-    return search_unspsc_codes(query, unspsc_data)
+        
+    results = search_unspsc_codes(query, unspsc_data, max_results=max_results)
+    print(f"Found {len(results)} results for query: {query}")
+    return results
