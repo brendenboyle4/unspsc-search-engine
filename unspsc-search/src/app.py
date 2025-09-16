@@ -17,7 +17,7 @@ def main():
     # Create search input with placeholder
     search_query = st.text_input(
         "Enter product description:",
-        placeholder="Example: microscope"
+        placeholder="Example: 'SEM' or 'scanning electron microscope'"
     )
     
     if search_query:
