@@ -77,89 +77,85 @@ ACRONYMS = {
 }
 
 def expand_query(query: str) -> List[str]:
-    """Expand search query to include acronym definitions and variations"""
+    """Expand search query to include acronym definitions"""
     query = query.lower().strip()
     queries = [query]
     
-    # Handle hyphenated terms
-    if '-' in query:
-        queries.append(query.replace('-', ' '))
+    # Add acronym expansion if it exists
+    if query in ACRONYMS:
+        queries.append(ACRONYMS[query])
     
-    # Handle common variations
-    variations = []
-    for q in queries:
-        # Add acronym expansion if it exists
-        if q in ACRONYMS:
-            variations.append(ACRONYMS[q])
-        
-        # Add variations without spaces
-        if ' ' in q:
-            variations.append(q.replace(' ', ''))
-        
-        # Add individual words
-        variations.extend(q.split())
-        
-        # Add common suffixes
-        if not q.endswith(('s', 'er', 'or')):
-            variations.extend([q + 's', q + 'er', q + 'or'])
+    # Add individual words for better matching
+    if ' ' in query:
+        queries.extend(query.split())
     
-    queries.extend(variations)
-    
-    # Remove duplicates while preserving order
-    seen = set()
-    return [x for x in queries if not (x in seen or seen.add(x))]
+    return list(set(queries))  # Remove duplicates
 
-def load_unspsc_data(file_path):
+def load_unspsc_data():
+    """Load UNSPSC codes from CSV file with better path handling"""
     try:
-        if not os.path.exists(file_path):
-            raise FileNotFoundError(f"Data file not found at {file_path}")
-        return pd.read_csv(file_path)
+        # Try multiple possible file paths
+        possible_paths = [
+            os.path.join(os.path.dirname(__file__), '..', 'data', 'unspsc_codes.csv'),
+            os.path.join('src', 'data', 'unspsc_codes.csv'),
+            os.path.join('data', 'unspsc_codes.csv'),
+        ]
+        
+        # Try each path until we find the file
+        for file_path in possible_paths:
+            if os.path.exists(file_path):
+                print(f"Loading data from: {file_path}")  # Debug info
+                df = pd.read_csv(file_path)
+                print(f"Loaded {len(df)} rows")  # Debug info
+                return df
+                
+        raise FileNotFoundError(f"Could not find unspsc_codes.csv in any of: {possible_paths}")
+        
     except Exception as e:
         print(f"Error loading data: {str(e)}")
+        print(f"Current working directory: {os.getcwd()}")  # Debug info
         return None
 
-def search_unspsc_codes(query, unspsc_data) -> List[Tuple[str, str]]:
-    if unspsc_data is None:
+def search_unspsc_codes(query: str, unspsc_data: pd.DataFrame) -> List[Tuple[str, str]]:
+    """Search UNSPSC codes using query"""
+    if unspsc_data is None or query.strip() == '':
         return []
     
     try:
-        codes = unspsc_data['Code'].astype(str).tolist()
-        descriptions = unspsc_data['Description'].str.lower().tolist()
-        
-        # Get all possible query variations
+        # Get expanded queries
         queries = expand_query(query)
         
-        # Store all matches with their scores
-        all_matches = []
+        # Search in both code and description columns
+        matches = []
         for q in queries:
-            # Search in both full description and individual words
-            for desc in descriptions:
-                desc_words = desc.split()
-                # Calculate match score based on full description and individual words
-                full_score = difflib.SequenceMatcher(None, q, desc).ratio()
-                word_scores = [difflib.SequenceMatcher(None, q, word).ratio() for word in desc_words]
-                # Use the maximum score between full match and word matches
-                score = max([full_score] + word_scores)
-                
-                if score > 0.3:  # Minimum similarity threshold
-                    index = descriptions.index(desc)
-                    all_matches.append((score, codes[index], unspsc_data['Description'].iloc[index]))
+            mask = (
+                unspsc_data['Code'].astype(str).str.contains(q, case=False) |
+                unspsc_data['Description'].str.contains(q, case=False)
+            )
+            matches.extend(
+                [
+                    (row['Code'], row['Description'])
+                    for _, row in unspsc_data[mask].iterrows()
+                ]
+            )
         
-        # Sort by score and remove duplicates while keeping highest score
-        seen_codes = set()
+        # Remove duplicates while preserving order
+        seen = set()
         results = []
-        for score, code, desc in sorted(all_matches, reverse=True):
-            if code not in seen_codes:
+        for code, desc in matches:
+            if code not in seen:
                 results.append((code, desc))
-                seen_codes.add(code)
+                seen.add(code)
         
-        return results[:5]  # Return top 5 unique results
+        return results[:5]  # Return top 5 results
         
     except Exception as e:
         print(f"Error during search: {str(e)}")
         return []
 
-def main_search_function(query):
-    file_path = os.path.join('src', 'data', 'unspsc_codes.csv')
-    unspsc_data = load_unspsc_data(file_path)
+def main_search_function(query: str) -> List[Tuple[str, str]]:
+    """Main function to handle search requests"""
+    unspsc_data = load_unspsc_data()
+    if unspsc_data is None:
+        return []
     return search_unspsc_codes(query, unspsc_data)
